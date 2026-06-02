@@ -1,0 +1,259 @@
+# Part 5: End-to-End POC Local Testing Laboratory
+# =================================================
+# This Docker Compose file simulates the full multi-tenant ELT pipeline
+# on a local workstation for integration testing and architectural validation.
+#
+# Architecture simulated:
+#   - RabbitMQ broker with management UI
+#   - MinIO object store (S3-compatible)
+#   - Decoder Pod (C++ decoder + sidecar sharing localhost network)
+#   - enrichment.geoip Pod (Python worker + sidecar sharing localhost network)
+#   - formatter.json Pod (Python worker + sidecar sharing localhost network)
+#
+# Usage:
+#   docker compose -f part5_poc/docker-compose.yml up --build
+#
+# The sidecars use `network_mode: service:<worker>` to share the worker's
+# network namespace, accurately simulating the K8s Pod localhost pattern.
+
+name: pelt-poc
+
+services:
+  # -------------------------------------------------------------------------
+  # Infrastructure: RabbitMQ Broker
+  # -------------------------------------------------------------------------
+  rabbitmq:
+    image: rabbitmq:3.12-management-alpine
+    container_name: pelt-rabbitmq
+    hostname: rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: platform
+      RABBITMQ_DEFAULT_PASS: platform-secret
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - pelt-network
+
+  # -------------------------------------------------------------------------
+  # Infrastructure: MinIO Object Store (S3-compatible)
+  # -------------------------------------------------------------------------
+  minio:
+    image: minio/minio:RELEASE.2024-01-16T16-07-38Z
+    container_name: pelt-minio
+    hostname: minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin123
+    volumes:
+      - minio_data:/data
+    # Note: MinIO readiness is verified by the setup script externally.
+    # The MinIO image does not guarantee curl/wget availability.
+    networks:
+      - pelt-network
+
+  # -------------------------------------------------------------------------
+  # Decoder Pod Simulation
+  # -------------------------------------------------------------------------
+  # The C++ decoder container runs the business logic HTTP server.
+  # The sidecar shares its network namespace (network_mode: service:decoder)
+  # so it can reach 127.0.0.1:8080 exactly as in Kubernetes.
+  # -------------------------------------------------------------------------
+  decoder:
+    build:
+      context: ../part2_decoder
+      dockerfile: Dockerfile
+    container_name: pelt-decoder
+    hostname: decoder
+    expose:
+      - "8080"
+    networks:
+      - pelt-network
+    healthcheck:
+      test: ["CMD", "/decoder_server", "--healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  decoder-sidecar:
+    build:
+      context: ../part3_sidecar
+      dockerfile: Dockerfile
+    container_name: pelt-decoder-sidecar
+    network_mode: service:decoder
+    environment:
+      MY_QUEUE: decoder.cplusplus
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: platform
+      RABBITMQ_PASS: platform-secret
+      RABBITMQ_VHOST: "/"
+      SIDECAR_LOG_LEVEL: INFO
+      HTTP_BUSINESS_ENDPOINT: http://127.0.0.1:8080/process
+      POD_NAME: pelt-decoder-sidecar
+      POD_NAMESPACE: pelt-poc
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      decoder:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # -------------------------------------------------------------------------
+  # enrichment.geoip Pod Simulation
+  # -------------------------------------------------------------------------
+  enrichment:
+    build:
+      context: ./enrichment_geoip
+      dockerfile: Dockerfile
+    container_name: pelt-enrichment
+    hostname: enrichment
+    expose:
+      - "8080"
+    networks:
+      - pelt-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  enrichment-sidecar:
+    build:
+      context: ../part3_sidecar
+      dockerfile: Dockerfile
+    container_name: pelt-enrichment-sidecar
+    network_mode: service:enrichment
+    environment:
+      MY_QUEUE: enrichment.geoip
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: platform
+      RABBITMQ_PASS: platform-secret
+      RABBITMQ_VHOST: "/"
+      SIDECAR_LOG_LEVEL: INFO
+      HTTP_BUSINESS_ENDPOINT: http://127.0.0.1:8080/process
+      POD_NAME: pelt-enrichment-sidecar
+      POD_NAMESPACE: pelt-poc
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      enrichment:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # -------------------------------------------------------------------------
+  # formatter.json Pod Simulation
+  # -------------------------------------------------------------------------
+  formatter:
+    build:
+      context: ./formatter_json
+      dockerfile: Dockerfile
+    container_name: pelt-formatter
+    hostname: formatter
+    expose:
+      - "8080"
+    networks:
+      - pelt-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # -------------------------------------------------------------------------
+  # enrichment.threat_intel Pod Simulation
+  # -------------------------------------------------------------------------
+  threat-intel:
+    build:
+      context: ./enrichment_threat_intel
+      dockerfile: Dockerfile
+    container_name: pelt-threat-intel
+    hostname: threat-intel
+    expose:
+      - "8080"
+    networks:
+      - pelt-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  threat-intel-sidecar:
+    build:
+      context: ../part3_sidecar
+      dockerfile: Dockerfile
+    container_name: pelt-threat-intel-sidecar
+    network_mode: service:threat-intel
+    environment:
+      MY_QUEUE: enrichment.threat_intel
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: platform
+      RABBITMQ_PASS: platform-secret
+      RABBITMQ_VHOST: "/"
+      SIDECAR_LOG_LEVEL: INFO
+      HTTP_BUSINESS_ENDPOINT: http://127.0.0.1:8080/process
+      POD_NAME: pelt-threat-intel-sidecar
+      POD_NAMESPACE: pelt-poc
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      threat-intel:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # -------------------------------------------------------------------------
+  # formatter.json Pod Simulation
+  # -------------------------------------------------------------------------
+  formatter-sidecar:
+    build:
+      context: ../part3_sidecar
+      dockerfile: Dockerfile
+    container_name: pelt-formatter-sidecar
+    network_mode: service:formatter
+    environment:
+      MY_QUEUE: formatter.json
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: platform
+      RABBITMQ_PASS: platform-secret
+      RABBITMQ_VHOST: "/"
+      SIDECAR_LOG_LEVEL: INFO
+      HTTP_BUSINESS_ENDPOINT: http://127.0.0.1:8080/process
+      POD_NAME: pelt-formatter-sidecar
+      POD_NAMESPACE: pelt-poc
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      formatter:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  rabbitmq_data:
+  minio_data:
+
+networks:
+  pelt-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.25.0.0/16

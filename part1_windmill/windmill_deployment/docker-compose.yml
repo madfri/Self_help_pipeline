@@ -1,0 +1,100 @@
+# Windmill Self-Hosted Deployment (Community Edition)
+# ====================================================
+# This Docker Compose file spins up a complete, local Windmill instance
+# suitable for running the Developer Onboarding Portal.
+#
+# Stack:
+#   - windmill_server: API + UI (port 8000)
+#   - windmill_worker: Job execution engine
+#   - windmill_lsp:    Code editor language server
+#   - postgres:        Application database
+#
+# Usage:
+#   cd part1_windmill/windmill_deployment
+#   docker compose up -d
+#   # Open http://localhost:8000 in your browser
+#   # Default credentials: admin@windmill.dev / changeme
+#
+# After first login, change the default password immediately.
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: windmill-db
+    environment:
+      POSTGRES_USER: windmill
+      POSTGRES_PASSWORD: windmill-secret
+      POSTGRES_DB: windmill
+    volumes:
+      - windmill_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U windmill -d windmill"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - windmill-network
+
+  windmill_server:
+    image: ghcr.io/windmill-labs/windmill:main
+    container_name: windmill-server
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgres://windmill:windmill-secret@db:5432/windmill?sslmode=disable
+      MODE: server
+      BASE_URL: http://localhost:8000
+      RUST_LOG: info
+      NUM_WORKERS: 2
+      TIMEOUT: 300
+      # Default admin credentials (change after first login)
+      # You can also set these to pre-seed a user:
+      # ADMIN_USERNAME: admin@windmill.dev
+      # ADMIN_PASSWORD: changeme
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - windmill-network
+    restart: unless-stopped
+
+  windmill_worker:
+    image: ghcr.io/windmill-labs/windmill:main
+    container_name: windmill-worker
+    environment:
+      DATABASE_URL: postgres://windmill:windmill-secret@db:5432/windmill?sslmode=disable
+      MODE: worker
+      WORKER_GROUP: default
+      NUM_WORKERS: 4
+      TIMEOUT: 300
+      # Enable Python execution
+      PYTHON_PATH: /usr/local/bin/python3
+    depends_on:
+      db:
+        condition: service_healthy
+      windmill_server:
+        condition: service_started
+    networks:
+      - windmill-network
+    restart: unless-stopped
+
+  windmill_lsp:
+    image: ghcr.io/windmill-labs/windmill:main
+    container_name: windmill-lsp
+    environment:
+      DATABASE_URL: postgres://windmill:windmill-secret@db:5432/windmill?sslmode=disable
+      MODE: lsp
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - windmill-network
+    restart: unless-stopped
+
+volumes:
+  windmill_db_data:
+
+networks:
+  windmill-network:
+    driver: bridge

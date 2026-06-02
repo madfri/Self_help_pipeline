@@ -1,0 +1,535 @@
+# Part 4: Unified Kubernetes Manifests
+# =====================================
+# This file demonstrates production-grade Kubernetes Deployments for:
+#   1. The Decoder Pod (business-logic + sidecar containers).
+#   2. A downstream enrichment worker (enrichment.geoip) using the same
+#      message-popping choreography to prove continuous event flow.
+#
+# Apply with: kubectl apply -f infrastructure.yaml -n pelt-platform
+#
+# Assumptions:
+#   - Namespace 'pelt-platform' exists.
+#   - Secret 'rabbitmq-credentials' exists in the namespace.
+#   - The platform sidecar image is built and pushed to the registry.
+#   - The enrichment worker image is built and pushed to the registry.
+
+---
+# ---------------------------------------------------------------------------
+# ConfigMap: Shared platform configuration (non-sensitive)
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: platform-config
+  namespace: pelt-platform
+data:
+  RABBITMQ_VHOST: "/"
+  SIDECAR_LOG_LEVEL: "INFO"
+  COMPLETED_QUEUE: "pipeline.completed"
+  DLQ_QUEUE: "pipeline.dlq"
+
+---
+# ---------------------------------------------------------------------------
+# Secret: RabbitMQ credentials (replace with your actual values or Vault agent)
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rabbitmq-credentials
+  namespace: pelt-platform
+type: Opaque
+stringData:
+  host: "rabbitmq.pelt-platform.svc.cluster.local"
+  port: "5672"
+  username: "platform"
+  password: "platform-secret-password"
+
+---
+# ---------------------------------------------------------------------------
+# Deployment: decoder-example
+# ---------------------------------------------------------------------------
+# This Deployment demonstrates the Platform Sidecar Pattern.
+# A single Pod contains:
+#   - business-logic: The external developer's C++ decoder image.
+#   - sidecar: The platform-managed AMQP sidecar.
+# Both share the Pod's localhost network interface (127.0.0.1).
+# ---------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: decoder-example
+  namespace: pelt-platform
+  labels:
+    app: decoder-example
+    component: decoder
+    managed-by: platform
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: decoder-example
+  template:
+    metadata:
+      labels:
+        app: decoder-example
+        component: decoder
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: decoder-sa
+      terminationGracePeriodSeconds: 30
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: decoder-example
+      containers:
+        # -------------------------------------------------------------------
+        # Container 1: Business Logic (Developer's C++ Decoder)
+        # -------------------------------------------------------------------
+        - name: business-logic
+          image: registry.example.com/decoders/cpp-decoder:v1.0.0
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+              name: http
+              protocol: TCP
+          env:
+            - name: FINGERPRINT
+              value: "0x8100"
+            - name: RUNTIME_LANGUAGE
+              value: "C++"
+            - name: DEVELOPER_NAME
+              value: "example-dev"
+            - name: DECODER_LOG_LEVEL
+              value: "info"
+          resources:
+            limits:
+              cpu: "1000m"
+              memory: "512Mi"
+            requests:
+              cpu: "250m"
+              memory: "128Mi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop:
+                - ALL
+
+        # -------------------------------------------------------------------
+        # Container 2: Platform Sidecar (AMQP Consumer + Router)
+        # -------------------------------------------------------------------
+        - name: sidecar
+          image: registry.example.com/platform/sidecar:v1.0.0
+          imagePullPolicy: Always
+          env:
+            - name: MY_QUEUE
+              value: "decoder.cplusplus"
+            - name: RABBITMQ_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-credentials
+                  key: host
+            - name: RABBITMQ_PORT
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-credentials
+                  key: port
+            - name: RABBITMQ_USER
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-credentials
+                  key: username
+            - name: RABBITMQ_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-credentials
+                  key: password
+            - name: RABBITMQ_VHOST
+              valueFrom:
+                configMapKeyRef:
+                  name: platform-config
+                  key: RABBITMQ_VHOST
+            - name: SIDECAR_LOG_LEVEL
+              valueFrom:
+                configMapKeyRef:
+                  name: platform-config
+                  key: SIDECAR_LOG_LEVEL
+            - name: HTTP_BUSINESS_ENDPOINT
+              value: "http://127.0.0.1:8080/process"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+            requests:
+              cpu: "100m"
+              memory: "64Mi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop:
+                - ALL
+
+---
+# ---------------------------------------------------------------------------
+# Deployment: enrichment-geoip
+# ---------------------------------------------------------------------------
+# This downstream worker demonstrates that the choreography continues
+# seamlessly after the decoder stage. It consumes from 'enrichment.geoip',
+# runs its own business logic, pops its queue from the itinerary, and
+# routes to the next queue (e.g., 'formatter.json' or 'pipeline.completed').
+# ---------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: enrichment-geoip
+  namespace: pelt-platform
+  labels:
+    app: enrichment-geoip
+    component: enrichment
+    managed-by: platform
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: enrichment-geoip
+  template:
+    metadata:
+      labels:
+        app: enrichment-geoip
+        component: enrichment
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: enrichment-sa
+      terminationGracePeriodSeconds: 30
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: enrichment-geoip
+      containers:
+        # -------------------------------------------------------------------
+        # Container 1: GeoIP Enrichment Logic (Python HTTP Server)
+        # -------------------------------------------------------------------
+        - name: business-logic
+          image: registry.example.com/enrichment/geoip:v1.0.0
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+              name: http
+              protocol: TCP
+          env:
+            - name: ENRICHMENT_TYPE
+              value: "geoip"
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+            requests:
+              cpu: "100m"
+              memory: "64Mi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop:
+                - ALL
+
+        # -------------------------------------------------------------------
+        # Container 2: Platform Sidecar (same image, different MY_QUEUE)
+        # -------------------------------------------------------------------
+        - name: sidecar
+          image: registry.example.com/platform/sidecar:v1.0.0
+          imagePullPolicy: Always
+          env:
+            - name: MY_QUEUE
+              value: "enrichment.geoip"
+            - name: RABBITMQ_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-credentials
+                  key: host
+            - name: RABBITMQ_PORT
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-credentials
+                  key: port
+            - name: RABBITMQ_USER
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-credentials
+                  key: username
+            - name: RABBITMQ_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-credentials
+                  key: password
+            - name: RABBITMQ_VHOST
+              valueFrom:
+                configMapKeyRef:
+                  name: platform-config
+                  key: RABBITMQ_VHOST
+            - name: SIDECAR_LOG_LEVEL
+              valueFrom:
+                configMapKeyRef:
+                  name: platform-config
+                  key: SIDECAR_LOG_LEVEL
+            - name: HTTP_BUSINESS_ENDPOINT
+              value: "http://127.0.0.1:8080/process"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+            requests:
+              cpu: "100m"
+              memory: "64Mi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop:
+                - ALL
+
+---
+# ---------------------------------------------------------------------------
+# Deployment: formatter-json
+# ---------------------------------------------------------------------------
+# The final formatting stage. Uses the same sidecar pattern to pop
+# 'formatter.json' from the itinerary and route to 'pipeline.completed'.
+# ---------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: formatter-json
+  namespace: pelt-platform
+  labels:
+    app: formatter-json
+    component: formatter
+    managed-by: platform
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: formatter-json
+  template:
+    metadata:
+      labels:
+        app: formatter-json
+        component: formatter
+    spec:
+      serviceAccountName: formatter-sa
+      terminationGracePeriodSeconds: 30
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: formatter-json
+      containers:
+        - name: business-logic
+          image: registry.example.com/formatters/json:v1.0.0
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+              name: http
+              protocol: TCP
+          env:
+            - name: FORMATTER_TYPE
+              value: "json"
+          resources:
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+            requests:
+              cpu: "100m"
+              memory: "64Mi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop:
+                - ALL
+
+        - name: sidecar
+          image: registry.example.com/platform/sidecar:v1.0.0
+          imagePullPolicy: Always
+          env:
+            - name: MY_QUEUE
+              value: "formatter.json"
+            - name: RABBITMQ_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-credentials
+                  key: host
+            - name: RABBITMQ_PORT
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-credentials
+                  key: port
+            - name: RABBITMQ_USER
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-credentials
+                  key: username
+            - name: RABBITMQ_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-credentials
+                  key: password
+            - name: RABBITMQ_VHOST
+              valueFrom:
+                configMapKeyRef:
+                  name: platform-config
+                  key: RABBITMQ_VHOST
+            - name: SIDECAR_LOG_LEVEL
+              valueFrom:
+                configMapKeyRef:
+                  name: platform-config
+                  key: SIDECAR_LOG_LEVEL
+            - name: HTTP_BUSINESS_ENDPOINT
+              value: "http://127.0.0.1:8080/process"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+            requests:
+              cpu: "100m"
+              memory: "64Mi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop:
+                - ALL
+
+---
+# ---------------------------------------------------------------------------
+# ServiceAccounts
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: decoder-sa
+  namespace: pelt-platform
+automountServiceAccountToken: true
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: enrichment-sa
+  namespace: pelt-platform
+automountServiceAccountToken: true
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: formatter-sa
+  namespace: pelt-platform
+automountServiceAccountToken: true

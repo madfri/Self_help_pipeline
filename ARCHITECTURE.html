@@ -1,0 +1,587 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Self-Help ELT Platform — Detailed Architecture</title>
+    <script type="module">
+        import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+        mermaid.initialize({ startOnLoad: true, theme: 'dark' });
+    </script>
+    <style>
+        :root {
+            --bg: #0d1117;
+            --card: #161b22;
+            --border: #30363d;
+            --text: #c9d1d9;
+            --heading: #f0f6fc;
+            --accent: #58a6ff;
+        }
+        * { box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+            margin: 0;
+            padding: 0;
+        }
+        header {
+            background: linear-gradient(90deg, #1f2937, #111827);
+            border-bottom: 1px solid var(--border);
+            padding: 2rem 1.5rem;
+            text-align: center;
+        }
+        header h1 {
+            color: var(--heading);
+            margin: 0 0 0.5rem;
+            font-size: 1.75rem;
+        }
+        header p {
+            margin: 0;
+            color: #8b949e;
+            font-size: 0.95rem;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem 1.5rem;
+        }
+        .diagram-card {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            margin-bottom: 2.5rem;
+            overflow: hidden;
+        }
+        .diagram-header {
+            background: #1f2937;
+            border-bottom: 1px solid var(--border);
+            padding: 1rem 1.25rem;
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+        .diagram-number {
+            background: var(--accent);
+            color: #fff;
+            font-weight: 700;
+            font-size: 0.85rem;
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+        }
+        .diagram-title {
+            color: var(--heading);
+            font-size: 1.1rem;
+            font-weight: 600;
+            margin: 0;
+        }
+        .diagram-desc {
+            padding: 0.75rem 1.25rem;
+            color: #8b949e;
+            font-size: 0.9rem;
+            border-bottom: 1px solid var(--border);
+        }
+        .diagram-body {
+            padding: 1.25rem;
+            overflow-x: auto;
+        }
+        .diagram-body .mermaid {
+            display: flex;
+            justify-content: center;
+        }
+        .diagram-body svg {
+            max-width: 100%;
+            height: auto;
+        }
+        footer {
+            text-align: center;
+            padding: 2rem;
+            color: #6e7681;
+            font-size: 0.85rem;
+            border-top: 1px solid var(--border);
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Self-Help ELT Platform</h1>
+        <p>Detailed Architecture Diagrams — All 7 Views</p>
+    </header>
+
+    <div class="container">
+
+        <div class="diagram-card">
+            <div class="diagram-header">
+                <div class="diagram-number">1</div>
+                <h2 class="diagram-title">High-Level System Architecture</h2>
+            </div>
+            <div class="diagram-desc">Complete platform from the external developer's browser through Windmill, Kubernetes, RabbitMQ, and MinIO to final pipeline completion.</div>
+            <div class="diagram-body">
+                <pre class="mermaid">
+flowchart TB
+    subgraph DEV["External Developer"]
+        BROWSER[Browser]
+    end
+
+    subgraph WM["Part 1: Windmill Self-Help Portal"]
+        WMSERVER[Windmill Server&lt;br/&gt;localhost:8000]
+        APP[Developer Onboarding Portal&lt;br/&gt;Low-Code App]
+        SCRIPT[deploy_decoder_k8s.py&lt;br/&gt;Python Script]
+    end
+
+    subgraph K8S["Kubernetes Cluster"]
+        K8S_API[K8s API Server]
+
+        subgraph DECODER_POD["Decoder Pod"]
+            C_DECODER["C++ Decoder Server&lt;br/&gt;127.0.0.1:8080"]
+            C_SIDEAR["Platform Sidecar&lt;br/&gt;Python + Pika"]
+        end
+
+        subgraph GEOIP_POD["GeoIP Pod"]
+            PY_GEOIP["GeoIP Enrichment&lt;br/&gt;FastAPI 127.0.0.1:8080"]
+            GEO_SIDEAR["Platform Sidecar"]
+        end
+
+        subgraph THREAT_POD["Threat Intel Pod"]
+            PY_THREAT["Threat Intel Enrichment&lt;br/&gt;FastAPI 127.0.0.1:8080"]
+            THR_SIDEAR["Platform Sidecar"]
+        end
+
+        subgraph FMT_POD["Formatter Pod"]
+            PY_FMT["JSON Formatter&lt;br/&gt;FastAPI 127.0.0.1:8080"]
+            FMT_SIDEAR["Platform Sidecar"]
+        end
+    end
+
+    subgraph INFRA["Infrastructure Layer"]
+        RMQ["RabbitMQ Broker&lt;br/&gt;localhost:5672"]
+        MINIO["MinIO S3-Compatible Store&lt;br/&gt;localhost:9000"]
+    end
+
+    subgraph DONE["Completed Pipeline"]
+        DLQ[("Dead Letter Queue&lt;br/&gt;pipeline.dlq")]
+        COMP[("Completed Queue&lt;br/&gt;pipeline.completed")]
+    end
+
+    BROWSER -->|HTTPS| WMSERVER
+    WMSERVER --> APP
+    APP -->|Form Submit| SCRIPT
+    SCRIPT -->|Apply Deployment| K8S_API
+    K8S_API -->|Creates| C_DECODER
+    K8S_API -->|Creates| C_SIDEAR
+
+    MINIO -->|Claim Check&lt;br/&gt;Raw PCAP Binary| C_DECODER
+    C_SIDEAR <-->|AMQP Consume| RMQ
+    C_SIDEAR -->|HTTP POST&lt;br/&gt;JSON Envelope| C_DECODER
+    C_DECODER -->|HTTP 200&lt;br/&gt;Modified Envelope| C_SIDEAR
+    C_SIDEAR -->|Publish| RMQ
+
+    RMQ -->|Route to&lt;br/&gt;enrichment.geoip| GEO_SIDEAR
+    GEO_SIDEAR -->|HTTP POST| PY_GEOIP
+    PY_GEOIP -->|HTTP 200| GEO_SIDEAR
+    GEO_SIDEAR -->|Publish| RMQ
+
+    RMQ -->|Route to&lt;br/&gt;enrichment.threat_intel| THR_SIDEAR
+    THR_SIDEAR -->|HTTP POST| PY_THREAT
+    PY_THREAT -->|HTTP 200| THR_SIDEAR
+    THR_SIDEAR -->|Publish| RMQ
+
+    RMQ -->|Route to&lt;br/&gt;formatter.json| FMT_SIDEAR
+    FMT_SIDEAR -->|HTTP POST| PY_FMT
+    PY_FMT -->|HTTP 200| FMT_SIDEAR
+    FMT_SIDEAR -->|Publish| RMQ
+
+    RMQ -->|DLQ| DLQ
+    RMQ -->|Final| COMP
+
+    style BROWSER fill:#e1f5fe,color:#000
+    style WMSERVER fill:#fff3e0,color:#000
+    style APP fill:#fff3e0,color:#000
+    style SCRIPT fill:#fff3e0,color:#000
+    style C_DECODER fill:#e8f5e9,color:#000
+    style C_SIDEAR fill:#ffebee,color:#000
+    style PY_GEOIP fill:#e8f5e9,color:#000
+    style GEO_SIDEAR fill:#ffebee,color:#000
+    style PY_THREAT fill:#e8f5e9,color:#000
+    style THR_SIDEAR fill:#ffebee,color:#000
+    style PY_FMT fill:#e8f5e9,color:#000
+    style FMT_SIDEAR fill:#ffebee,color:#000
+    style RMQ fill:#f3e5f5,color:#000
+    style MINIO fill:#f3e5f5,color:#000
+    style COMP fill:#c8e6c9,color:#000
+    style DLQ fill:#ffcdd2,color:#000
+                </pre>
+            </div>
+        </div>
+
+        <div class="diagram-card">
+            <div class="diagram-header">
+                <div class="diagram-number">2</div>
+                <h2 class="diagram-title">Platform Sidecar Pattern (Pod-Level Detail)</h2>
+            </div>
+            <div class="diagram-desc">Zooms into a single Pod showing how the sidecar consumes from RabbitMQ, POSTs to 127.0.0.1:8080, gets the modified envelope back, ACKs, and routes to the next queue.</div>
+            <div class="diagram-body">
+                <pre class="mermaid">
+flowchart LR
+    subgraph POD["Kubernetes Pod: decoder-example"]
+        subgraph NET["Shared Network Namespace"]
+            direction TB
+            LOOPBACK["127.0.0.1 Loopback"]
+        end
+
+        subgraph BIZ["Container: business-logic"]
+            C_HEALTH["/health&lt;br/&gt;200 OK"]
+            C_READY["/ready&lt;br/&gt;200 OK"]
+            C_PROCESS["/process&lt;br/&gt;POST JSON Envelope"]
+            C_CODE["C++ Decoder Code"]
+        end
+
+        subgraph SIDE["Container: sidecar"]
+            S_AMQP["AMQP Consumer&lt;br/&gt;pika BlockingConnection"]
+            S_HTTP["HTTP Client&lt;br/&gt;requests Session"]
+            S_ROUTER["Itinerary Router&lt;br/&gt;Pop Current Queue"]
+            S_ACK["Manual ACK/NACK"]
+            S_DLQ["DLQ Handler"]
+        end
+    end
+
+    RMQ_IN[("RabbitMQ&lt;br/&gt;decoder.cplusplus")]
+    RMQ_OUT[("RabbitMQ&lt;br/&gt;enrichment.geoip")]
+
+    RMQ_IN -->|"1. Consume Message"| S_AMQP
+    S_AMQP -->|"2. Forward JSON"| S_HTTP
+    S_HTTP -->|"3. POST 127.0.0.1:8080/process"| LOOPBACK
+    LOOPBACK -->|"4. Receive"| C_PROCESS
+    C_PROCESS -->|"5. Parse Fingerprint"| C_CODE
+    C_CODE -->|"6. Rewrite Itinerary"| C_PROCESS
+    C_PROCESS -->|"7. Return 200 + JSON"| LOOPBACK
+    LOOPBACK -->|"8. Response"| S_HTTP
+    S_HTTP -->|"9. Parse Response"| S_ROUTER
+    S_ROUTER -->|"10. Pop 'decoder.cplusplus'"| S_ROUTER
+    S_ROUTER -->|"11. Determine Next Queue"| S_AMQP
+    S_AMQP -->|"12. Publish"| RMQ_OUT
+    S_AMQP -->|"13. ch.basic_ack"| RMQ_IN
+
+    C_PROCESS -.->|"Liveness Probe"| C_HEALTH
+    C_PROCESS -.->|"Readiness Probe"| C_READY
+
+    S_HTTP -.->|"Timeout / 500"| S_DLQ
+    S_DLQ -->|"ch.basic_nack&lt;br/&gt;requeue=False"| RMQ_IN
+
+    style C_CODE fill:#e8f5e9,color:#000
+    style S_AMQP fill:#ffebee,color:#000
+    style S_ROUTER fill:#ffebee,color:#000
+    style LOOPBACK fill:#fff9c4,color:#000
+                </pre>
+            </div>
+        </div>
+
+        <div class="diagram-card">
+            <div class="diagram-header">
+                <div class="diagram-number">3</div>
+                <h2 class="diagram-title">Message Flow &amp; Dynamic Choreography</h2>
+            </div>
+            <div class="diagram-desc">Exact lifecycle of an Initial Envelope as it progresses through the pipeline, including the dynamic itinerary rewrite by the C++ decoder.</div>
+            <div class="diagram-body">
+                <pre class="mermaid">
+sequenceDiagram
+    autonumber
+    participant IN as Test Injector
+    participant RMQ as RabbitMQ
+    participant D_S as Decoder Sidecar
+    participant D_C as C++ Decoder
+    participant G_S as GeoIP Sidecar
+    participant G_C as GeoIP Worker
+    participant T_S as ThreatIntel Sidecar
+    participant T_C as ThreatIntel Worker
+    participant F_S as Formatter Sidecar
+    participant F_C as Formatter Worker
+    participant OUT as pipeline.completed
+
+    Note over IN,D_C: Initial Envelope&lt;br/&gt;itinerary: (decoder.cplusplus, enrichment.geoip, formatter.json)&lt;br/&gt;fingerprint: 0x8100
+
+    IN->>RMQ: Publish to decoder.cplusplus
+    RMQ->>D_S: Deliver message (delivery_tag=1)
+    D_S->>D_C: POST 127.0.0.1:8080/process
+    D_C->>D_C: Inspect fingerprint 0x8100
+    Note right of D_C: Threat indicator detected!&lt;br/&gt;Insert 'enrichment.threat_intel' before 'formatter.json'
+    D_C->>D_S: HTTP 200 + Modified Envelope&lt;br/&gt;itinerary: (decoder.cplusplus, enrichment.geoip, enrichment.threat_intel, formatter.json)
+    D_S->>D_S: Pop 'decoder.cplusplus'&lt;br/&gt;Next queue: enrichment.geoip
+    D_S->>RMQ: Publish to enrichment.geoip
+    D_S->>RMQ: ch.basic_ack(delivery_tag=1)
+
+    RMQ->>G_S: Deliver message
+    G_S->>G_C: POST 127.0.0.1:8080/process
+    G_C->>G_C: Add geoip metadata
+    G_C->>G_S: HTTP 200 + Enriched Envelope
+    G_S->>G_S: Pop 'enrichment.geoip'&lt;br/&gt;Next queue: enrichment.threat_intel
+    G_S->>RMQ: Publish to enrichment.threat_intel
+    G_S->>RMQ: ch.basic_ack()
+
+    RMQ->>T_S: Deliver message
+    T_S->>T_C: POST 127.0.0.1:8080/process
+    T_C->>T_C: Add IoC / reputation data
+    T_C->>T_S: HTTP 200 + Enriched Envelope
+    T_S->>T_S: Pop 'enrichment.threat_intel'&lt;br/&gt;Next queue: formatter.json
+    T_S->>RMQ: Publish to formatter.json
+    T_S->>RMQ: ch.basic_ack()
+
+    RMQ->>F_S: Deliver message
+    F_S->>F_C: POST 127.0.0.1:8080/process
+    F_C->>F_C: Normalize schema, set status
+    F_C->>F_S: HTTP 200 + Formatted Envelope
+    F_S->>F_S: Pop 'formatter.json'&lt;br/&gt;Next queue: pipeline.completed
+    F_S->>RMQ: Publish to pipeline.completed
+    F_S->>RMQ: ch.basic_ack()
+
+    RMQ->>OUT: Message arrives
+    Note over OUT: Final Envelope&lt;br/&gt;itinerary: ()&lt;br/&gt;pipeline_status: formatted
+                </pre>
+            </div>
+        </div>
+
+        <div class="diagram-card">
+            <div class="diagram-header">
+                <div class="diagram-number">4</div>
+                <h2 class="diagram-title">Claim Check Pattern Detail</h2>
+            </div>
+            <div class="diagram-desc">Raw binary data never flows through the message broker — only lightweight JSON metadata envelopes do.</div>
+            <div class="diagram-body">
+                <pre class="mermaid">
+flowchart LR
+    subgraph OBJ["Object Storage"]
+        RAW[("Raw PCAP Bucket&lt;br/&gt;s3://packet-storage/raw/")]
+        DEC[("Decoded Output Bucket&lt;br/&gt;s3://packet-storage/decoded/")]
+    end
+
+    subgraph BROKER["Message Broker"]
+        Q1["decoder.cplusplus"]
+        Q2["enrichment.geoip"]
+        Q3["enrichment.threat_intel"]
+        Q4["formatter.json"]
+        Q5["pipeline.completed"]
+    end
+
+    subgraph ENVELOPE["JSON Envelope Contents"]
+        ENV1["{&lt;br/&gt;pcap_uri: s3://.../raw/file_123.pcap,&lt;br/&gt;decoded_data_uri: '',&lt;br/&gt;fingerprint: 0x8100,&lt;br/&gt;itinerary: (decoder.cplusplus, ...]&lt;br/&gt;}"]
+        ENV2["{&lt;br/&gt;pcap_uri: s3://.../raw/file_123.pcap,&lt;br/&gt;decoded_data_uri: s3://.../decoded/file.json,&lt;br/&gt;fingerprint: 0x8100,&lt;br/&gt;itinerary: [enrichment.geoip, ...]&lt;br/&gt;}"]
+    end
+
+    RAW -.->|"1. Reference only"| ENV1
+    ENV1 -->|"2. Flows through"| Q1
+    ENV1 --> Q2
+    ENV1 --> Q3
+    ENV1 --> Q4
+    ENV1 --> Q5
+    ENV2 -.->|"3. Reference to decoded output"| DEC
+
+    style RAW fill:#c8e6c9,color:#000
+    style DEC fill:#c8e6c9,color:#000
+    style ENV1 fill:#fff9c4,color:#000
+    style ENV2 fill:#fff9c4,color:#000
+    style Q1 fill:#f3e5f5,color:#000
+    style Q2 fill:#f3e5f5,color:#000
+    style Q3 fill:#f3e5f5,color:#000
+    style Q4 fill:#f3e5f5,color:#000
+    style Q5 fill:#f3e5f5,color:#000
+                </pre>
+            </div>
+        </div>
+
+        <div class="diagram-card">
+            <div class="diagram-header">
+                <div class="diagram-number">5</div>
+                <h2 class="diagram-title">Windmill-to-Kubernetes Deployment Flow</h2>
+            </div>
+            <div class="diagram-desc">Exactly what happens when an external developer clicks Deploy Decoder in the Windmill Self-Help Portal.</div>
+            <div class="diagram-body">
+                <pre class="mermaid">
+flowchart TB
+    subgraph DEV["External Developer"]
+        FORM_FILL["Fill Form:&lt;br/&gt;- Name&lt;br/&gt;- Fingerprint&lt;br/&gt;- Runtime&lt;br/&gt;- Docker Image&lt;br/&gt;- Target Queue"]
+    end
+
+    subgraph WM["Windmill Control Plane"]
+        UI["Windmill App UI&lt;br/&gt;Developer Onboarding Portal"]
+        SCRIPT["Windmill Script Executor&lt;br/&gt;deploy_decoder_k8s.py"]
+    end
+
+    subgraph K8S_CTRL["Kubernetes Control Plane"]
+        API["K8s API Server"]
+        ETCD["etcd"]
+        SCHED["Scheduler"]
+    end
+
+    subgraph NODE["Worker Node"]
+        KUBELET["Kubelet"]
+
+        subgraph POD2["Created Pod: decoder-alice-dev"]
+            CONT1["Container: business-logic&lt;br/&gt;External Dev's C++ Image"]
+            CONT2["Container: sidecar&lt;br/&gt;Platform Sidecar Image"]
+        end
+    end
+
+    subgraph SEC["Secret Store"]
+        SECRET["Secret: rabbitmq-credentials&lt;br/&gt;host, port, user, pass"]
+    end
+
+    FORM_FILL -->|"Submit"| UI
+    UI -->|"Trigger Script&lt;br/&gt;Pass form values"| SCRIPT
+    SCRIPT -->|"1. Generate Deployment Manifest&lt;br/&gt;2. Set MY_QUEUE env var"| API
+    API -->|"Store desired state"| ETCD
+    ETCD -->|"Notify"| SCHED
+    SCHED -->|"Assign to Node"| KUBELET
+    KUBELET -->|"Pull Images"| CONT1
+    KUBELET -->|"Pull Images"| CONT2
+    KUBELET -->|"Inject Secrets"| CONT2
+    SECRET -->|"Mount as envFrom"| CONT2
+
+    style UI fill:#fff3e0,color:#000
+    style SCRIPT fill:#fff3e0,color:#000
+    style API fill:#e3f2fd,color:#000
+    style CONT1 fill:#e8f5e9,color:#000
+    style CONT2 fill:#ffebee,color:#000
+    style SECRET fill:#fce4ec,color:#000
+                </pre>
+            </div>
+        </div>
+
+        <div class="diagram-card">
+            <div class="diagram-header">
+                <div class="diagram-number">6</div>
+                <h2 class="diagram-title">Error Handling &amp; Dead Letter Queue Flow</h2>
+            </div>
+            <div class="diagram-desc">What happens when the business logic container fails or returns an HTTP 500.</div>
+            <div class="diagram-body">
+                <pre class="mermaid">
+flowchart TB
+    subgraph NORMAL["Normal Flow"]
+        RMQ["RabbitMQ Queue"]
+        SIDEAR["Platform Sidecar"]
+        BIZ["Business Logic&lt;br/&gt;127.0.0.1:8080"]
+        NEXT["Next Queue"]
+    end
+
+    subgraph FAIL["Failure Scenarios"]
+        TIMEOUT["HTTP Timeout"]
+        CONN_ERR["Connection Refused"]
+        HTTP_500["HTTP 500 Error"]
+        BAD_JSON["Invalid JSON Response"]
+    end
+
+    subgraph DLQ_GRP["Dead Letter Queue"]
+        DLQ[("pipeline.dlq")]
+        DLQ_CONSUMER["DLQ Consumer / Alert Manager"]
+        ALERT["PagerDuty / Slack Alert"]
+    end
+
+    RMQ -->|"Message"| SIDEAR
+    SIDEAR -->|"POST /process"| BIZ
+
+    BIZ -.->|"Crash / Unreachable"| CONN_ERR
+    BIZ -.->|"Slow / Hanging"| TIMEOUT
+    BIZ -.->|"Runtime Exception"| HTTP_500
+    BIZ -.->|"Malformed JSON"| BAD_JSON
+
+    CONN_ERR -->|"ch.basic_nack&lt;br/&gt;requeue=False"| DLQ
+    TIMEOUT -->|"ch.basic_nack&lt;br/&gt;requeue=False"| DLQ
+    HTTP_500 -->|"ch.basic_nack&lt;br/&gt;requeue=False"| DLQ
+    BAD_JSON -->|"ch.basic_nack&lt;br/&gt;requeue=False"| DLQ
+
+    BIZ -->|"HTTP 200"| SIDEAR
+    SIDEAR -->|"ch.basic_ack"| RMQ
+    SIDEAR -->|"Publish"| NEXT
+
+    DLQ -->|"Monitor Depth"| DLQ_CONSUMER
+    DLQ_CONSUMER -->|"Alert on Threshold"| ALERT
+
+    style RMQ fill:#f3e5f5,color:#000
+    style SIDEAR fill:#ffebee,color:#000
+    style BIZ fill:#e8f5e9,color:#000
+    style DLQ fill:#ffcdd2,color:#000
+    style CONN_ERR fill:#ffebee,color:#000
+    style TIMEOUT fill:#ffebee,color:#000
+    style HTTP_500 fill:#ffebee,color:#000
+    style BAD_JSON fill:#ffebee,color:#000
+    style ALERT fill:#fff3e0,color:#000
+                </pre>
+            </div>
+        </div>
+
+        <div class="diagram-card">
+            <div class="diagram-header">
+                <div class="diagram-number">7</div>
+                <h2 class="diagram-title">Network Topology (Docker Compose POC)</h2>
+            </div>
+            <div class="diagram-desc">How the local POC simulates the Kubernetes Pod networking model using Docker Compose.</div>
+            <div class="diagram-body">
+                <pre class="mermaid">
+flowchart TB
+    subgraph DOCKER["Docker Network: pelt-poc_pelt-network"]
+        RMQ["RabbitMQ&lt;br/&gt;rabbitmq:5672"]
+        MINIO["MinIO&lt;br/&gt;minio:9000"]
+
+        subgraph DECODER_POD2["Simulated Pod: Decoder"]
+            D_NET["Network Namespace&lt;br/&gt;Shared"]
+            D_CPP["C++ Decoder&lt;br/&gt;127.0.0.1:8080"]
+            D_SIDE["Sidecar&lt;br/&gt;network_mode: service:decoder"]
+        end
+
+        subgraph GEOIP_POD2["Simulated Pod: GeoIP"]
+            G_NET["Network Namespace&lt;br/&gt;Shared"]
+            G_PY["GeoIP Worker&lt;br/&gt;127.0.0.1:8080"]
+            G_SIDE["Sidecar&lt;br/&gt;network_mode: service:enrichment"]
+        end
+
+        subgraph THREAT_POD2["Simulated Pod: ThreatIntel"]
+            T_NET["Network Namespace&lt;br/&gt;Shared"]
+            T_PY["ThreatIntel Worker&lt;br/&gt;127.0.0.1:8080"]
+            T_SIDE["Sidecar&lt;br/&gt;network_mode: service:threat-intel"]
+        end
+
+        subgraph FMT_POD2["Simulated Pod: Formatter"]
+            F_NET["Network Namespace&lt;br/&gt;Shared"]
+            F_PY["Formatter Worker&lt;br/&gt;127.0.0.1:8080"]
+            F_SIDE["Sidecar&lt;br/&gt;network_mode: service:formatter"]
+        end
+    end
+
+    RMQ <-->|"AMQP"| D_SIDE
+    D_SIDE -->|"HTTP 127.0.0.1:8080"| D_CPP
+    D_SIDE -->|"AMQP Publish"| RMQ
+    RMQ <-->|"AMQP"| G_SIDE
+    G_SIDE -->|"HTTP 127.0.0.1:8080"| G_PY
+    G_SIDE -->|"AMQP Publish"| RMQ
+    RMQ <-->|"AMQP"| T_SIDE
+    T_SIDE -->|"HTTP 127.0.0.1:8080"| T_PY
+    T_SIDE -->|"AMQP Publish"| RMQ
+    RMQ <-->|"AMQP"| F_SIDE
+    F_SIDE -->|"HTTP 127.0.0.1:8080"| F_PY
+    F_SIDE -->|"AMQP Publish"| RMQ
+
+    D_CPP -.->|"Resolves via DNS"| RMQ
+    D_SIDE -.->|"Resolves via DNS"| RMQ
+
+    style D_NET fill:#fff9c4,color:#000
+    style G_NET fill:#fff9c4,color:#000
+    style T_NET fill:#fff9c4,color:#000
+    style F_NET fill:#fff9c4,color:#000
+    style RMQ fill:#f3e5f5,color:#000
+    style MINIO fill:#f3e5f5,color:#000
+                </pre>
+            </div>
+        </div>
+
+    </div>
+
+    <footer>
+        Self-Help ELT Platform Architecture &middot; Rendered with Mermaid.js
+    </footer>
+</body>
+</html>
